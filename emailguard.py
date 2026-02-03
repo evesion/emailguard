@@ -15,7 +15,7 @@ SETUP:
        The CSV must have columns: from_name, from_email, user_name, password, smtp_host
 
 USAGE:
-    python emailguard.py
+    python3 emailguard.py
 
 GitHub: https://github.com/USERNAME/emailguard
 ===============================================================================

@@ -16,7 +16,7 @@ A tool to test email inbox placement rates across Google and Microsoft using the
 ### 1. Install Dependencies
 
 ```bash
-pip install requests reportlab
+pip3 install requests reportlab
 ```
 
 ### 2. Configure API Key
@@ -41,7 +41,7 @@ Create a CSV file named `smartlead_output.csv` with your email accounts:
 ### 4. Run the Script
 
 ```bash
-python emailguard.py
+python3 emailguard.py
 ```
 
 ## Usage
