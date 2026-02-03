@@ -17,12 +17,12 @@ SETUP:
 USAGE:
     python3 emailguard.py
 
-GitHub: https://github.com/USERNAME/emailguard
+GitHub: https://github.com/evesion/emailguard
 ===============================================================================
 """
 
 __version__ = "1.0.0"
-__repo__ = "USERNAME/emailguard"  # Update this after creating your repo
+__repo__ = "evesion/emailguard"  # Update this after creating your repo
 
 import csv
 import json
