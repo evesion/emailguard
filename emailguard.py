@@ -21,7 +21,7 @@ GitHub: https://github.com/evesion/emailguard
 ===============================================================================
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __repo__ = "evesion/emailguard"
 
 import csv
@@ -51,10 +51,13 @@ SMTP_PORT = 465
 EMAIL_SUBJECT = "Team Meeting Code"
 EMAIL_BODY = """Hello Team, Please find here todays meeting code:"""
 
-MAX_DOMAINS_PER_BATCH = 50
+DEFAULT_BATCH_SIZE = 50
 MAX_PARALLEL_WORKERS = 5
 EMAIL_DELAY_SECONDS = 3
 POLL_INTERVAL_SECONDS = 30
+
+# Required CSV columns
+REQUIRED_CSV_COLUMNS = ['from_email', 'user_name', 'password', 'smtp_host']
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # INTERNAL SETTINGS
@@ -64,11 +67,124 @@ API_BASE_URL = "https://app.emailguard.io/api/v1"
 DATA_DIR = '.emailguard_data'
 CONFIG_FILE = '.env'
 CUSTOMERS_FILE = os.path.join(DATA_DIR, 'customers.json')
+SETTINGS_FILE = os.path.join(DATA_DIR, 'settings.json')
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
 API_KEY = None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SETTINGS MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def load_settings():
+    ensure_data_dir()
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    return {'batch_size': DEFAULT_BATCH_SIZE}
+
+
+def save_settings(settings):
+    ensure_data_dir()
+    with open(SETTINGS_FILE, 'w') as f:
+        json.dump(settings, f, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CSV VALIDATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def validate_csv(csv_file):
+    """
+    Validate CSV file format and return detailed error messages.
+    Returns: (is_valid, error_message, row_count, domain_count)
+    """
+    if not csv_file:
+        return False, "No CSV file selected", 0, 0
+
+    if not os.path.exists(csv_file):
+        return False, f"File not found: {csv_file}", 0, 0
+
+    try:
+        with open(csv_file, mode='r', encoding='utf-8-sig') as file:
+            # Check if file is empty
+            content = file.read()
+            if not content.strip():
+                return False, "CSV file is empty", 0, 0
+
+            file.seek(0)
+            csv_reader = csv.DictReader(file)
+
+            # Check headers
+            if not csv_reader.fieldnames:
+                return False, "CSV file has no headers", 0, 0
+
+            headers = [h.strip().lower() for h in csv_reader.fieldnames]
+            missing_columns = []
+            for col in REQUIRED_CSV_COLUMNS:
+                if col.lower() not in headers:
+                    missing_columns.append(col)
+
+            if missing_columns:
+                return False, f"Missing required columns: {', '.join(missing_columns)}", 0, 0
+
+            # Validate rows
+            row_count = 0
+            domains = set()
+            errors = []
+
+            for i, row in enumerate(csv_reader, start=2):  # Start at 2 (1 is header)
+                row_count += 1
+
+                # Check for empty required fields
+                for col in REQUIRED_CSV_COLUMNS:
+                    # Find the actual column name (case-insensitive)
+                    actual_col = None
+                    for h in csv_reader.fieldnames:
+                        if h.strip().lower() == col.lower():
+                            actual_col = h
+                            break
+
+                    if actual_col and not row.get(actual_col, '').strip():
+                        if len(errors) < 5:  # Limit error messages
+                            errors.append(f"Row {i}: Empty '{col}'")
+
+                # Extract domain
+                from_email_col = None
+                for h in csv_reader.fieldnames:
+                    if h.strip().lower() == 'from_email':
+                        from_email_col = h
+                        break
+
+                if from_email_col and row.get(from_email_col):
+                    email = row[from_email_col].strip()
+                    if '@' in email:
+                        domain = email.split('@')[-1]
+                        domains.add(domain)
+                    elif len(errors) < 5:
+                        errors.append(f"Row {i}: Invalid email format")
+
+            if row_count == 0:
+                return False, "CSV file has no data rows", 0, 0
+
+            if errors:
+                error_msg = "CSV validation errors:\n• " + "\n• ".join(errors)
+                if len(errors) >= 5:
+                    error_msg += "\n• (more errors...)"
+                return False, error_msg, row_count, len(domains)
+
+            return True, None, row_count, len(domains)
+
+    except UnicodeDecodeError:
+        return False, "CSV file encoding error. Please save as UTF-8.", 0, 0
+    except Exception as e:
+        return False, f"Error reading CSV: {str(e)}", 0, 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -122,6 +238,60 @@ def create_customer(name):
     data['active_batch'] = None
     save_customers(data)
     return True
+
+
+def delete_customer(customer_name):
+    """Delete a customer and all their data"""
+    data = load_customers()
+
+    if customer_name not in data['customers']:
+        return False, "Customer not found"
+
+    # Remove customer directory
+    customer_dir = get_customer_dir(customer_name)
+    if os.path.exists(customer_dir):
+        shutil.rmtree(customer_dir)
+
+    # Update customers list
+    data['customers'].remove(customer_name)
+
+    # Clear active customer if it was deleted
+    if data['active_customer'] == customer_name:
+        data['active_customer'] = data['customers'][0] if data['customers'] else None
+        data['active_batch'] = None
+
+    save_customers(data)
+    return True, "Customer deleted"
+
+
+def delete_batch(customer_name, batch_name):
+    """Delete a batch and all its data"""
+    customer_dir = get_customer_dir(customer_name)
+    batch_dir = get_batch_dir(customer_name, batch_name)
+
+    # Remove batch directory
+    if os.path.exists(batch_dir):
+        shutil.rmtree(batch_dir)
+
+    # Update customer state
+    state_file = os.path.join(customer_dir, 'customer_state.json')
+    if os.path.exists(state_file):
+        with open(state_file, 'r') as f:
+            customer_state = json.load(f)
+
+        if batch_name in customer_state.get('batches', []):
+            customer_state['batches'].remove(batch_name)
+            with open(state_file, 'w') as f:
+                json.dump(customer_state, f, indent=2)
+
+    # Update active batch if it was deleted
+    data = load_customers()
+    if data['active_batch'] == batch_name and data['active_customer'] == customer_name:
+        batches = get_customer_batches(customer_name)
+        data['active_batch'] = batches[0] if batches else None
+        save_customers(data)
+
+    return True, "Batch deleted"
 
 
 def create_batch(customer_name, batch_name):
@@ -258,10 +428,18 @@ def get_unique_domains(csv_file):
         with open(csv_file, mode='r', encoding='utf-8-sig') as file:
             csv_reader = csv.DictReader(file)
             for row in csv_reader:
-                domain = row['from_email'].split('@')[-1]
-                if domain not in domain_to_row:
-                    domains.append(domain)
-                    domain_to_row[domain] = row
+                # Case-insensitive column lookup
+                from_email = None
+                for key in row.keys():
+                    if key.strip().lower() == 'from_email':
+                        from_email = row[key]
+                        break
+
+                if from_email and '@' in from_email:
+                    domain = from_email.split('@')[-1]
+                    if domain not in domain_to_row:
+                        domains.append(domain)
+                        domain_to_row[domain] = row
     except FileNotFoundError:
         return None, None, f"CSV file '{csv_file}' not found"
     except KeyError as e:
@@ -728,8 +906,8 @@ class EmailGuardApp:
     def __init__(self):
         self.root = ctk.CTk()
         self.root.title(f"EmailGuard Inbox Placement Tester v{__version__}")
-        self.root.geometry("950x750")
-        self.root.minsize(900, 700)
+        self.root.geometry("950x800")
+        self.root.minsize(900, 750)
 
         # Set theme
         ctk.set_appearance_mode("dark")
@@ -743,6 +921,10 @@ class EmailGuardApp:
         self.current_customer = None
         self.current_batch = None
         self.current_csv = None
+
+        # Load settings
+        self.settings = load_settings()
+        self.batch_size = self.settings.get('batch_size', DEFAULT_BATCH_SIZE)
 
         self.setup_ui()
         self.load_saved_state()
@@ -780,20 +962,44 @@ class EmailGuardApp:
         customer_frame.pack(side="left", fill="x", expand=True, padx=(10, 5), pady=10)
 
         ctk.CTkLabel(customer_frame, text="👤 Customer:", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
-        self.customer_dropdown = ctk.CTkOptionMenu(customer_frame, width=180, values=["No customers"],
+        self.customer_dropdown = ctk.CTkOptionMenu(customer_frame, width=150, values=["No customers"],
                                                     command=self.on_customer_change)
         self.customer_dropdown.pack(side="left", padx=(10, 5))
-        ctk.CTkButton(customer_frame, text="+ New", width=70, command=self.new_customer).pack(side="left")
+        ctk.CTkButton(customer_frame, text="+", width=30, command=self.new_customer).pack(side="left")
+        ctk.CTkButton(customer_frame, text="🗑", width=30, fg_color="#8B0000", hover_color="#A52A2A",
+                      command=self.delete_customer_dialog).pack(side="left", padx=(5, 0))
 
         # Batch selection
         batch_frame = ctk.CTkFrame(selection_frame, fg_color="transparent")
         batch_frame.pack(side="left", fill="x", expand=True, padx=(5, 10), pady=10)
 
         ctk.CTkLabel(batch_frame, text="📦 Batch:", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
-        self.batch_dropdown = ctk.CTkOptionMenu(batch_frame, width=180, values=["No batches"],
+        self.batch_dropdown = ctk.CTkOptionMenu(batch_frame, width=150, values=["No batches"],
                                                  command=self.on_batch_change)
         self.batch_dropdown.pack(side="left", padx=(10, 5))
-        ctk.CTkButton(batch_frame, text="+ New", width=70, command=self.new_batch).pack(side="left")
+        ctk.CTkButton(batch_frame, text="+", width=30, command=self.new_batch).pack(side="left")
+        ctk.CTkButton(batch_frame, text="🗑", width=30, fg_color="#8B0000", hover_color="#A52A2A",
+                      command=self.delete_batch_dialog).pack(side="left", padx=(5, 0))
+
+        # Batch size slider frame
+        slider_frame = ctk.CTkFrame(self.main_frame)
+        slider_frame.pack(fill="x", pady=(0, 15))
+
+        slider_inner = ctk.CTkFrame(slider_frame, fg_color="transparent")
+        slider_inner.pack(fill="x", padx=15, pady=10)
+
+        ctk.CTkLabel(slider_inner, text="📊 Batch Size:", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+
+        self.batch_size_label = ctk.CTkLabel(slider_inner, text=f"{self.batch_size} domains",
+                                              font=ctk.CTkFont(size=13), width=100)
+        self.batch_size_label.pack(side="right")
+
+        self.batch_size_slider = ctk.CTkSlider(slider_inner, from_=10, to=100, number_of_steps=9,
+                                                command=self.on_batch_size_change, width=300)
+        self.batch_size_slider.set(self.batch_size)
+        self.batch_size_slider.pack(side="right", padx=(20, 10))
+
+        ctk.CTkLabel(slider_inner, text="10", font=ctk.CTkFont(size=11), text_color="gray").pack(side="right")
 
         # Status cards
         cards_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
@@ -836,7 +1042,7 @@ class EmailGuardApp:
         log_label = ctk.CTkLabel(self.main_frame, text="Activity Log", font=ctk.CTkFont(size=14, weight="bold"), anchor="w")
         log_label.pack(fill="x")
 
-        self.log_text = ctk.CTkTextbox(self.main_frame, height=200, font=ctk.CTkFont(family="Courier", size=12))
+        self.log_text = ctk.CTkTextbox(self.main_frame, height=180, font=ctk.CTkFont(family="Courier", size=12))
         self.log_text.pack(fill="both", expand=True, pady=(5, 15))
 
         # Bottom buttons - Row 1
@@ -856,8 +1062,8 @@ class EmailGuardApp:
         self.settings_btn = ctk.CTkButton(bottom_frame1, text="⚙️ Settings", width=100, command=self.show_settings)
         self.settings_btn.pack(side="right")
 
-        self.reset_btn = ctk.CTkButton(bottom_frame1, text="🗑️ Reset Batch", width=120,
-                                        fg_color="#8B0000", hover_color="#A52A2A", command=self.reset_batch)
+        self.reset_btn = ctk.CTkButton(bottom_frame1, text="🔄 Reset Batch", width=120,
+                                        fg_color="#555555", hover_color="#666666", command=self.reset_batch)
         self.reset_btn.pack(side="right", padx=(0, 10))
 
     def create_stat_card(self, parent, title, value, icon):
@@ -879,6 +1085,13 @@ class EmailGuardApp:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_text.insert("end", f"[{timestamp}] {message}\n")
         self.log_text.see("end")
+
+    def on_batch_size_change(self, value):
+        self.batch_size = int(value)
+        self.batch_size_label.configure(text=f"{self.batch_size} domains")
+        # Save to settings
+        self.settings['batch_size'] = self.batch_size
+        save_settings(self.settings)
 
     def load_saved_state(self):
         data = load_customers()
@@ -983,6 +1196,20 @@ class EmailGuardApp:
             self.load_batches_for_customer(name)
             self.log(f"Created customer: {name}")
 
+    def delete_customer_dialog(self):
+        if not self.current_customer or self.current_customer == "No customers":
+            messagebox.showinfo("Info", "No customer selected")
+            return
+
+        if messagebox.askyesno("Delete Customer",
+                               f"Are you sure you want to delete '{self.current_customer}' and ALL their batches?\n\nThis cannot be undone!"):
+            success, msg = delete_customer(self.current_customer)
+            if success:
+                self.log(f"Deleted customer: {self.current_customer}")
+                self.load_saved_state()
+            else:
+                messagebox.showerror("Error", msg)
+
     def new_batch(self):
         if not self.current_customer or self.current_customer == "No customers":
             messagebox.showerror("Error", "Please create a customer first")
@@ -999,6 +1226,20 @@ class EmailGuardApp:
             self.current_batch = name
             self.load_batch_status()
             self.log(f"Created batch: {name}")
+
+    def delete_batch_dialog(self):
+        if not self.current_batch or self.current_batch == "No batches":
+            messagebox.showinfo("Info", "No batch selected")
+            return
+
+        if messagebox.askyesno("Delete Batch",
+                               f"Are you sure you want to delete batch '{self.current_batch}'?\n\nThis will delete all test data and cannot be undone!"):
+            success, msg = delete_batch(self.current_customer, self.current_batch)
+            if success:
+                self.log(f"Deleted batch: {self.current_batch}")
+                self.load_batches_for_customer(self.current_customer)
+            else:
+                messagebox.showerror("Error", msg)
 
     def check_api_key(self):
         if not load_api_key():
@@ -1046,6 +1287,14 @@ class EmailGuardApp:
             self.show_settings()
             return
 
+        # Validate CSV before running
+        is_valid, error_msg, row_count, domain_count = validate_csv(self.current_csv)
+        if not is_valid:
+            messagebox.showerror("CSV Validation Error", error_msg)
+            return
+
+        self.log(f"CSV validated: {row_count} rows, {domain_count} unique domains")
+
         self.running = True
         self.run_btn.configure(state="disabled")
         self.status_card.value_label.configure(text="Running...")
@@ -1066,8 +1315,8 @@ class EmailGuardApp:
                     self.root.after(0, lambda: self.log("All domains processed!"))
                     return
 
-                batch = remaining[:MAX_DOMAINS_PER_BATCH]
-                self.root.after(0, lambda: self.log(f"Starting with {len(batch)} domains"))
+                batch = remaining[:self.batch_size]
+                self.root.after(0, lambda: self.log(f"Starting with {len(batch)} domains (batch size: {self.batch_size})"))
 
                 session = create_api_session()
                 results = []
@@ -1078,6 +1327,14 @@ class EmailGuardApp:
                     self.root.after(0, lambda d=domain: self.log(f"Processing: {d}"))
 
                     row = domain_map[domain]
+
+                    # Case-insensitive column access
+                    def get_col(row, col_name):
+                        for key in row.keys():
+                            if key.strip().lower() == col_name.lower():
+                                return row[key]
+                        return ''
+
                     test_name = f"{self.current_customer} - {self.current_batch} - {domain}"
                     test_result, error = create_test(session, test_name)
 
@@ -1091,14 +1348,15 @@ class EmailGuardApp:
                     test_emails = test_data['comma_separated_test_email_addresses']
 
                     success, err = send_email(
-                        row.get('from_name', ''), row['from_email'], row['user_name'],
-                        row['password'], row['smtp_host'], test_emails.replace(',', ';'), filter_phrase
+                        get_col(row, 'from_name'), get_col(row, 'from_email'),
+                        get_col(row, 'user_name'), get_col(row, 'password'),
+                        get_col(row, 'smtp_host'), test_emails.replace(',', ';'), filter_phrase
                     )
 
                     if success:
                         self.root.after(0, lambda: self.log(f"  ✅ Email sent"))
                         results.append({
-                            'domain': domain, 'from_email': row['from_email'],
+                            'domain': domain, 'from_email': get_col(row, 'from_email'),
                             'test_uuid': test_uuid, 'filter_phrase': filter_phrase,
                             'test_url': f"https://app.emailguard.io/inbox-placement-tests/{test_uuid}"
                         })
@@ -1325,7 +1583,7 @@ class EmailGuardApp:
         if not self.current_customer or not self.current_batch:
             return
 
-        if messagebox.askyesno("Confirm Reset", f"This will delete all test data for batch '{self.current_batch}'. Continue?"):
+        if messagebox.askyesno("Confirm Reset", f"This will reset progress for batch '{self.current_batch}' (keeps test data). Continue?"):
             files = get_batch_files(self.current_customer, self.current_batch)
             for f in [files['queue'], files['results'], files['report']]:
                 if os.path.exists(f):
@@ -1346,11 +1604,18 @@ class EmailGuardApp:
 
         file = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
         if file:
+            # Validate CSV before accepting
+            is_valid, error_msg, row_count, domain_count = validate_csv(file)
+
+            if not is_valid:
+                messagebox.showerror("CSV Validation Error", error_msg)
+                return
+
             self.current_csv = file
             state = get_batch_state(self.current_customer, self.current_batch)
             state['csv_file'] = file
             save_batch_state(self.current_customer, self.current_batch, state)
-            self.log(f"CSV file: {os.path.basename(file)}")
+            self.log(f"CSV loaded: {os.path.basename(file)} ({domain_count} domains)")
             self.load_batch_status()
 
     def open_batch_report(self):
