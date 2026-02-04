@@ -16,7 +16,7 @@ A tool to test email inbox placement rates across Google and Microsoft using the
 ### 1. Install Dependencies
 
 ```bash
-pip3 install requests reportlab
+pip3 install requests reportlab customtkinter
 ```
 
 ### 2. Configure API Key
@@ -46,21 +46,17 @@ python3 emailguard.py
 
 ## Usage
 
-The script presents an interactive menu:
+The script launches a modern desktop GUI:
 
-```
-┌────────────────────────────────────────────────────────┐
-│                      MAIN MENU                         │
-├────────────────────────────────────────────────────────┤
-│  [1]  Run New Tests      - Send test emails            │
-│  [2]  Get Results        - Fetch results & generate PDF│
-│  [3]  Auto-Poll Results  - Wait until all complete     │
-│  [4]  Reset All          - Clear data and start fresh  │
-│  [5]  Help               - Show instructions           │
-│  [6]  Check for Updates  - Update to latest version    │
-│  [0]  Exit                                             │
-└────────────────────────────────────────────────────────┘
-```
+![EmailGuard GUI](https://via.placeholder.com/800x500?text=EmailGuard+GUI)
+
+**Features:**
+- 📊 Status cards showing domains processed and tests in queue
+- ▶️ Run New Tests - Process up to 50 domains per batch
+- 📊 Get Results - Fetch results and generate PDF report
+- 🔄 Auto-Poll - Keep checking until all tests complete
+- ⚙️ Settings - Configure API key
+- 📄 Open Report - View generated PDF
 
 ### Typical Workflow
 
@@ -119,6 +115,7 @@ Select option [6] to download and install the update.
 - Python 3.7+
 - `requests` - HTTP library
 - `reportlab` - PDF generation
+- `customtkinter` - Modern GUI framework
 
 ## License
 
