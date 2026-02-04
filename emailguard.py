@@ -21,7 +21,7 @@ GitHub: https://github.com/evesion/emailguard
 ===============================================================================
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __repo__ = "evesion/emailguard"
 
 import csv
@@ -47,7 +47,6 @@ from urllib3.util.retry import Retry
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-CSV_INPUT_FILE = 'smartlead_output.csv'
 SMTP_PORT = 465
 EMAIL_SUBJECT = "Team Meeting Code"
 EMAIL_BODY = """Hello Team, Please find here todays meeting code:"""
@@ -64,15 +63,149 @@ POLL_INTERVAL_SECONDS = 30
 API_BASE_URL = "https://app.emailguard.io/api/v1"
 DATA_DIR = '.emailguard_data'
 CONFIG_FILE = '.env'
-BATCH_STATE_FILE = os.path.join(DATA_DIR, 'batch_state.json')
-OUTPUT_CSV_FILE = os.path.join(DATA_DIR, 'test_queue.csv')
-RESULTS_CSV_FILE = 'inbox_placement_results.csv'
-PDF_REPORT_FILE = 'inbox_placement_report.pdf'
+CUSTOMERS_FILE = os.path.join(DATA_DIR, 'customers.json')
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
 API_KEY = None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CUSTOMER & BATCH MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def ensure_data_dir():
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
+
+
+def load_customers():
+    ensure_data_dir()
+    if os.path.exists(CUSTOMERS_FILE):
+        try:
+            with open(CUSTOMERS_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    return {'customers': [], 'active_customer': None, 'active_batch': None}
+
+
+def save_customers(data):
+    ensure_data_dir()
+    with open(CUSTOMERS_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+def get_customer_dir(customer_name):
+    safe_name = "".join(c for c in customer_name if c.isalnum() or c in (' ', '-', '_')).strip()
+    return os.path.join(DATA_DIR, safe_name)
+
+
+def get_batch_dir(customer_name, batch_name):
+    safe_batch = "".join(c for c in batch_name if c.isalnum() or c in (' ', '-', '_')).strip()
+    return os.path.join(get_customer_dir(customer_name), safe_batch)
+
+
+def create_customer(name):
+    data = load_customers()
+    if name not in data['customers']:
+        data['customers'].append(name)
+        customer_dir = get_customer_dir(name)
+        if not os.path.exists(customer_dir):
+            os.makedirs(customer_dir)
+        # Initialize customer state
+        customer_state = {'batches': [], 'created': datetime.now().isoformat()}
+        with open(os.path.join(customer_dir, 'customer_state.json'), 'w') as f:
+            json.dump(customer_state, f, indent=2)
+    data['active_customer'] = name
+    data['active_batch'] = None
+    save_customers(data)
+    return True
+
+
+def create_batch(customer_name, batch_name):
+    customer_dir = get_customer_dir(customer_name)
+    batch_dir = get_batch_dir(customer_name, batch_name)
+
+    # Load customer state
+    state_file = os.path.join(customer_dir, 'customer_state.json')
+    if os.path.exists(state_file):
+        with open(state_file, 'r') as f:
+            customer_state = json.load(f)
+    else:
+        customer_state = {'batches': [], 'created': datetime.now().isoformat()}
+
+    # Add batch if not exists
+    if batch_name not in customer_state['batches']:
+        customer_state['batches'].append(batch_name)
+        with open(state_file, 'w') as f:
+            json.dump(customer_state, f, indent=2)
+
+    # Create batch directory
+    if not os.path.exists(batch_dir):
+        os.makedirs(batch_dir)
+
+    # Initialize batch state
+    batch_state_file = os.path.join(batch_dir, 'batch_state.json')
+    if not os.path.exists(batch_state_file):
+        batch_state = {
+            'name': batch_name,
+            'processed_domains': [],
+            'created': datetime.now().isoformat(),
+            'csv_file': None
+        }
+        with open(batch_state_file, 'w') as f:
+            json.dump(batch_state, f, indent=2)
+
+    # Update active batch
+    data = load_customers()
+    data['active_batch'] = batch_name
+    save_customers(data)
+
+    return True
+
+
+def get_customer_batches(customer_name):
+    customer_dir = get_customer_dir(customer_name)
+    state_file = os.path.join(customer_dir, 'customer_state.json')
+    if os.path.exists(state_file):
+        with open(state_file, 'r') as f:
+            return json.load(f).get('batches', [])
+    return []
+
+
+def get_batch_state(customer_name, batch_name):
+    batch_dir = get_batch_dir(customer_name, batch_name)
+    state_file = os.path.join(batch_dir, 'batch_state.json')
+    if os.path.exists(state_file):
+        with open(state_file, 'r') as f:
+            return json.load(f)
+    return {'name': batch_name, 'processed_domains': [], 'csv_file': None}
+
+
+def save_batch_state(customer_name, batch_name, state):
+    batch_dir = get_batch_dir(customer_name, batch_name)
+    if not os.path.exists(batch_dir):
+        os.makedirs(batch_dir)
+    state_file = os.path.join(batch_dir, 'batch_state.json')
+    with open(state_file, 'w') as f:
+        json.dump(state, f, indent=2)
+
+
+def get_batch_files(customer_name, batch_name):
+    batch_dir = get_batch_dir(customer_name, batch_name)
+    return {
+        'dir': batch_dir,
+        'state': os.path.join(batch_dir, 'batch_state.json'),
+        'queue': os.path.join(batch_dir, 'test_queue.csv'),
+        'results': os.path.join(batch_dir, 'results.csv'),
+        'report': os.path.join(batch_dir, 'report.pdf')
+    }
+
+
+def get_customer_combined_report(customer_name):
+    return os.path.join(get_customer_dir(customer_name), 'combined_report.pdf')
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -108,11 +241,6 @@ def save_api_key(key):
         f.write(f"EMAILGUARD_API_KEY={key}\n")
 
 
-def ensure_data_dir():
-    if not os.path.exists(DATA_DIR):
-        os.makedirs(DATA_DIR)
-
-
 def create_api_session():
     session = requests.Session()
     retry_strategy = Retry(total=3, backoff_factor=2, status_forcelist=[429, 500, 502, 503, 504])
@@ -121,23 +249,6 @@ def create_api_session():
     session.mount("http://", adapter)
     session.headers.update({"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"})
     return session
-
-
-def load_batch_state():
-    ensure_data_dir()
-    if os.path.exists(BATCH_STATE_FILE):
-        try:
-            with open(BATCH_STATE_FILE, 'r') as f:
-                return json.load(f)
-        except:
-            pass
-    return {'processed_domains': [], 'batch_number': 0}
-
-
-def save_batch_state(state):
-    ensure_data_dir()
-    with open(BATCH_STATE_FILE, 'w') as f:
-        json.dump(state, f, indent=2)
 
 
 def get_unique_domains(csv_file):
@@ -315,26 +426,30 @@ def fetch_single_result(session, test_info):
     }
 
 
-def generate_pdf(all_results):
+def generate_pdf(all_results, output_file, title="Email Inbox Placement Report", subtitle=None):
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
     from reportlab.lib.enums import TA_CENTER
 
-    doc = SimpleDocTemplate(PDF_REPORT_FILE, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+    doc = SimpleDocTemplate(output_file, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
     styles = getSampleStyleSheet()
 
-    title_style = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=24, spaceAfter=30,
+    title_style = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=24, spaceAfter=10,
                                   alignment=TA_CENTER, textColor=colors.Color(0.2, 0.3, 0.5))
-    subtitle_style = ParagraphStyle('Subtitle', parent=styles['Normal'], fontSize=12,
-                                     alignment=TA_CENTER, textColor=colors.gray, spaceAfter=20)
+    subtitle_style = ParagraphStyle('Subtitle', parent=styles['Normal'], fontSize=14,
+                                     alignment=TA_CENTER, textColor=colors.Color(0.3, 0.4, 0.5), spaceAfter=5)
+    date_style = ParagraphStyle('Date', parent=styles['Normal'], fontSize=12,
+                                 alignment=TA_CENTER, textColor=colors.gray, spaceAfter=20)
     section_style = ParagraphStyle('Section', parent=styles['Heading2'], fontSize=14,
                                     spaceBefore=20, spaceAfter=10, textColor=colors.Color(0.2, 0.3, 0.5))
 
     story = []
-    story.append(Paragraph("Email Inbox Placement Report", title_style))
-    story.append(Paragraph(f"Generated on {datetime.now().strftime('%B %d, %Y at %H:%M')}", subtitle_style))
+    story.append(Paragraph(title, title_style))
+    if subtitle:
+        story.append(Paragraph(subtitle, subtitle_style))
+    story.append(Paragraph(f"Generated on {datetime.now().strftime('%B %d, %Y at %H:%M')}", date_style))
     story.append(Spacer(1, 20))
 
     completed = [r for r in all_results if r.get('status') in ['completed', 'complete']]
@@ -448,13 +563,162 @@ def generate_pdf(all_results):
     doc.build(story)
 
 
+def generate_combined_pdf(customer_name, batches_data, output_file):
+    """Generate a combined report for all batches of a customer"""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+    from reportlab.lib.enums import TA_CENTER
+
+    doc = SimpleDocTemplate(output_file, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=24, spaceAfter=10,
+                                  alignment=TA_CENTER, textColor=colors.Color(0.2, 0.3, 0.5))
+    subtitle_style = ParagraphStyle('Subtitle', parent=styles['Normal'], fontSize=16,
+                                     alignment=TA_CENTER, textColor=colors.Color(0.3, 0.4, 0.5), spaceAfter=5)
+    date_style = ParagraphStyle('Date', parent=styles['Normal'], fontSize=12,
+                                 alignment=TA_CENTER, textColor=colors.gray, spaceAfter=20)
+    section_style = ParagraphStyle('Section', parent=styles['Heading2'], fontSize=14,
+                                    spaceBefore=20, spaceAfter=10, textColor=colors.Color(0.2, 0.3, 0.5))
+    batch_title_style = ParagraphStyle('BatchTitle', parent=styles['Heading2'], fontSize=16,
+                                        spaceBefore=10, spaceAfter=15, textColor=colors.Color(0.2, 0.4, 0.6))
+
+    story = []
+
+    # Title page
+    story.append(Paragraph("Combined Inbox Placement Report", title_style))
+    story.append(Paragraph(f"Customer: {customer_name}", subtitle_style))
+    story.append(Paragraph(f"Generated on {datetime.now().strftime('%B %d, %Y at %H:%M')}", date_style))
+    story.append(Spacer(1, 30))
+
+    # Summary across all batches
+    all_results = []
+    for batch_name, results in batches_data.items():
+        all_results.extend(results)
+
+    completed = [r for r in all_results if r.get('status') in ['completed', 'complete']]
+
+    if completed:
+        avg_inbox = sum(r['stats']['inbox_rate'] for r in completed) / len(completed)
+        avg_spam = sum(r['stats']['spam_rate'] for r in completed) / len(completed)
+        google_tests = [r for r in completed if r['stats']['google_total'] > 0]
+        microsoft_tests = [r for r in completed if r['stats']['microsoft_total'] > 0]
+        avg_google = sum(r['stats']['google_inbox_rate'] for r in google_tests) / len(google_tests) if google_tests else 0
+        avg_microsoft = sum(r['stats']['microsoft_inbox_rate'] for r in microsoft_tests) / len(microsoft_tests) if microsoft_tests else 0
+
+        def get_color(val, is_spam=False):
+            if is_spam:
+                return colors.Color(0.1, 0.6, 0.2) if val <= 10 else (colors.Color(0.8, 0.6, 0) if val <= 25 else colors.Color(0.8, 0.2, 0.2))
+            return colors.Color(0.1, 0.6, 0.2) if val >= 70 else (colors.Color(0.8, 0.6, 0) if val >= 50 else colors.Color(0.8, 0.2, 0.2))
+
+        story.append(Paragraph("Overall Summary (All Batches)", section_style))
+
+        # Batch summary table
+        batch_summary = [['Batch', 'Tests', 'Inbox %', 'Google %', 'Microsoft %']]
+        for batch_name, results in batches_data.items():
+            batch_completed = [r for r in results if r.get('status') in ['completed', 'complete']]
+            if batch_completed:
+                b_inbox = sum(r['stats']['inbox_rate'] for r in batch_completed) / len(batch_completed)
+                b_google_tests = [r for r in batch_completed if r['stats']['google_total'] > 0]
+                b_microsoft_tests = [r for r in batch_completed if r['stats']['microsoft_total'] > 0]
+                b_google = sum(r['stats']['google_inbox_rate'] for r in b_google_tests) / len(b_google_tests) if b_google_tests else 0
+                b_microsoft = sum(r['stats']['microsoft_inbox_rate'] for r in b_microsoft_tests) / len(b_microsoft_tests) if b_microsoft_tests else 0
+                batch_summary.append([batch_name[:20], str(len(results)), f"{b_inbox:.0f}%", f"{b_google:.0f}%", f"{b_microsoft:.0f}%"])
+
+        if len(batch_summary) > 1:
+            batch_table = Table(batch_summary, colWidths=[140, 60, 80, 80, 90])
+            batch_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.Color(0.2, 0.3, 0.5)),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.Color(0.8, 0.8, 0.8)),
+                ('BOX', (0, 0), (-1, -1), 1, colors.Color(0.2, 0.3, 0.5)),
+                ('TOPPADDING', (0, 0), (-1, -1), 8),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ]))
+            story.append(batch_table)
+            story.append(Spacer(1, 20))
+
+        # Overall metrics
+        story.append(Paragraph("Combined Performance", section_style))
+        metrics_data = [['Total Inbox Rate', 'Google', 'Microsoft', 'Spam Rate'],
+                        [f'{avg_inbox:.1f}%', f'{avg_google:.1f}%', f'{avg_microsoft:.1f}%', f'{avg_spam:.1f}%']]
+        metrics_table = Table(metrics_data, colWidths=[120, 120, 120, 120])
+        metrics_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.Color(0.3, 0.4, 0.6)),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 1), (-1, 1), 18),
+            ('FONTNAME', (0, 1), (-1, 1), 'Helvetica-Bold'),
+            ('TEXTCOLOR', (0, 1), (0, 1), get_color(avg_inbox)),
+            ('TEXTCOLOR', (1, 1), (1, 1), get_color(avg_google)),
+            ('TEXTCOLOR', (2, 1), (2, 1), get_color(avg_microsoft)),
+            ('TEXTCOLOR', (3, 1), (3, 1), get_color(avg_spam, is_spam=True)),
+            ('BACKGROUND', (0, 1), (-1, 1), colors.Color(0.98, 0.98, 0.98)),
+            ('BOX', (0, 0), (-1, -1), 2, colors.Color(0.3, 0.4, 0.6)),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+            ('TOPPADDING', (0, 0), (-1, -1), 12),
+        ]))
+        story.append(metrics_table)
+
+    # Individual batch details
+    for batch_name, results in batches_data.items():
+        story.append(PageBreak())
+        story.append(Paragraph(f"Batch: {batch_name}", batch_title_style))
+
+        batch_completed = [r for r in results if r.get('status') in ['completed', 'complete']]
+        if batch_completed:
+            b_inbox = sum(r['stats']['inbox_rate'] for r in batch_completed) / len(batch_completed)
+            story.append(Paragraph(f"Tests: {len(results)} | Average Inbox Rate: {b_inbox:.1f}%", date_style))
+
+        # Detailed results table
+        table_data = [['Domain', 'Inbox %', 'Google %', 'Microsoft %', 'Spam %', 'Status']]
+        for r in results:
+            domain = r.get('from_email', '').split('@')[-1]
+            if len(domain) > 18: domain = domain[:15] + '...'
+            stats = r.get('stats', {})
+            table_data.append([
+                domain,
+                f"{stats.get('inbox_rate', 0):.0f}%" if stats else '-',
+                f"{stats.get('google_inbox_rate', 0):.0f}%" if stats else '-',
+                f"{stats.get('microsoft_inbox_rate', 0):.0f}%" if stats else '-',
+                f"{stats.get('spam_rate', 0):.0f}%" if stats else '-',
+                r.get('status', 'Unknown')
+            ])
+
+        detail_table = Table(table_data, colWidths=[110, 65, 70, 80, 65, 80])
+        style_cmds = [
+            ('BACKGROUND', (0, 0), (-1, 0), colors.Color(0.2, 0.3, 0.5)),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.Color(0.8, 0.8, 0.8)),
+            ('BOX', (0, 0), (-1, -1), 1, colors.Color(0.2, 0.3, 0.5)),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ]
+        for i in range(1, len(table_data)):
+            bg = colors.Color(0.95, 0.95, 0.97) if i % 2 == 0 else colors.white
+            style_cmds.append(('BACKGROUND', (0, i), (-1, i), bg))
+        detail_table.setStyle(TableStyle(style_cmds))
+        story.append(detail_table)
+
+    doc.build(story)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # GUI APPLICATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 try:
     import customtkinter as ctk
-    from tkinter import filedialog, messagebox
+    from tkinter import filedialog, messagebox, simpledialog
     GUI_AVAILABLE = True
 except ImportError:
     GUI_AVAILABLE = False
@@ -464,8 +728,8 @@ class EmailGuardApp:
     def __init__(self):
         self.root = ctk.CTk()
         self.root.title(f"EmailGuard Inbox Placement Tester v{__version__}")
-        self.root.geometry("900x700")
-        self.root.minsize(800, 600)
+        self.root.geometry("950x750")
+        self.root.minsize(900, 700)
 
         # Set theme
         ctk.set_appearance_mode("dark")
@@ -475,8 +739,13 @@ class EmailGuardApp:
         self.running = False
         self.poll_thread = None
 
+        # Current selection
+        self.current_customer = None
+        self.current_batch = None
+        self.current_csv = None
+
         self.setup_ui()
-        self.load_status()
+        self.load_saved_state()
         self.check_api_key()
 
         # Check for updates
@@ -489,7 +758,7 @@ class EmailGuardApp:
 
         # Header
         header_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        header_frame.pack(fill="x", pady=(0, 20))
+        header_frame.pack(fill="x", pady=(0, 15))
 
         title_label = ctk.CTkLabel(header_frame, text="📧 EmailGuard", font=ctk.CTkFont(size=28, weight="bold"))
         title_label.pack(side="left")
@@ -502,9 +771,33 @@ class EmailGuardApp:
         self.update_btn.pack(side="right")
         self.update_btn.pack_forget()  # Hidden initially
 
+        # Customer & Batch Selection Frame
+        selection_frame = ctk.CTkFrame(self.main_frame)
+        selection_frame.pack(fill="x", pady=(0, 15))
+
+        # Customer selection
+        customer_frame = ctk.CTkFrame(selection_frame, fg_color="transparent")
+        customer_frame.pack(side="left", fill="x", expand=True, padx=(10, 5), pady=10)
+
+        ctk.CTkLabel(customer_frame, text="👤 Customer:", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+        self.customer_dropdown = ctk.CTkOptionMenu(customer_frame, width=180, values=["No customers"],
+                                                    command=self.on_customer_change)
+        self.customer_dropdown.pack(side="left", padx=(10, 5))
+        ctk.CTkButton(customer_frame, text="+ New", width=70, command=self.new_customer).pack(side="left")
+
+        # Batch selection
+        batch_frame = ctk.CTkFrame(selection_frame, fg_color="transparent")
+        batch_frame.pack(side="left", fill="x", expand=True, padx=(5, 10), pady=10)
+
+        ctk.CTkLabel(batch_frame, text="📦 Batch:", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+        self.batch_dropdown = ctk.CTkOptionMenu(batch_frame, width=180, values=["No batches"],
+                                                 command=self.on_batch_change)
+        self.batch_dropdown.pack(side="left", padx=(10, 5))
+        ctk.CTkButton(batch_frame, text="+ New", width=70, command=self.new_batch).pack(side="left")
+
         # Status cards
         cards_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        cards_frame.pack(fill="x", pady=(0, 20))
+        cards_frame.pack(fill="x", pady=(0, 15))
 
         # Domains card
         self.domains_card = self.create_stat_card(cards_frame, "Domains", "0 / 0", "📋")
@@ -520,7 +813,7 @@ class EmailGuardApp:
 
         # Action buttons
         buttons_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        buttons_frame.pack(fill="x", pady=(0, 20))
+        buttons_frame.pack(fill="x", pady=(0, 15))
 
         self.run_btn = ctk.CTkButton(buttons_frame, text="▶️  Run New Tests", height=50,
                                       font=ctk.CTkFont(size=16, weight="bold"), command=self.run_tests)
@@ -543,25 +836,29 @@ class EmailGuardApp:
         log_label = ctk.CTkLabel(self.main_frame, text="Activity Log", font=ctk.CTkFont(size=14, weight="bold"), anchor="w")
         log_label.pack(fill="x")
 
-        self.log_text = ctk.CTkTextbox(self.main_frame, height=250, font=ctk.CTkFont(family="Courier", size=12))
-        self.log_text.pack(fill="both", expand=True, pady=(5, 20))
+        self.log_text = ctk.CTkTextbox(self.main_frame, height=200, font=ctk.CTkFont(family="Courier", size=12))
+        self.log_text.pack(fill="both", expand=True, pady=(5, 15))
 
-        # Bottom buttons
-        bottom_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        bottom_frame.pack(fill="x")
+        # Bottom buttons - Row 1
+        bottom_frame1 = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        bottom_frame1.pack(fill="x", pady=(0, 10))
 
-        self.settings_btn = ctk.CTkButton(bottom_frame, text="⚙️ Settings", width=120, command=self.show_settings)
-        self.settings_btn.pack(side="left")
+        self.csv_btn = ctk.CTkButton(bottom_frame1, text="📁 Select CSV", width=130, command=self.select_csv)
+        self.csv_btn.pack(side="left")
 
-        self.reset_btn = ctk.CTkButton(bottom_frame, text="🗑️ Reset All", width=120,
-                                        fg_color="#8B0000", hover_color="#A52A2A", command=self.reset_all)
-        self.reset_btn.pack(side="left", padx=(10, 0))
+        self.batch_report_btn = ctk.CTkButton(bottom_frame1, text="📄 Batch Report", width=130, command=self.open_batch_report)
+        self.batch_report_btn.pack(side="left", padx=(10, 0))
 
-        self.csv_btn = ctk.CTkButton(bottom_frame, text="📁 Select CSV", width=120, command=self.select_csv)
-        self.csv_btn.pack(side="right")
+        self.combined_report_btn = ctk.CTkButton(bottom_frame1, text="📑 Combined Report", width=140,
+                                                  fg_color="#1a5f1a", hover_color="#2d7a2d", command=self.generate_combined_report)
+        self.combined_report_btn.pack(side="left", padx=(10, 0))
 
-        self.open_report_btn = ctk.CTkButton(bottom_frame, text="📄 Open Report", width=120, command=self.open_report)
-        self.open_report_btn.pack(side="right", padx=(0, 10))
+        self.settings_btn = ctk.CTkButton(bottom_frame1, text="⚙️ Settings", width=100, command=self.show_settings)
+        self.settings_btn.pack(side="right")
+
+        self.reset_btn = ctk.CTkButton(bottom_frame1, text="🗑️ Reset Batch", width=120,
+                                        fg_color="#8B0000", hover_color="#A52A2A", command=self.reset_batch)
+        self.reset_btn.pack(side="right", padx=(0, 10))
 
     def create_stat_card(self, parent, title, value, icon):
         card = ctk.CTkFrame(parent, corner_radius=10)
@@ -583,22 +880,125 @@ class EmailGuardApp:
         self.log_text.insert("end", f"[{timestamp}] {message}\n")
         self.log_text.see("end")
 
-    def load_status(self):
-        domains, _, error = get_unique_domains(CSV_INPUT_FILE)
-        state = load_batch_state()
+    def load_saved_state(self):
+        data = load_customers()
+        customers = data.get('customers', [])
 
-        if domains:
-            processed = len(state.get('processed_domains', []))
-            self.domains_card.value_label.configure(text=f"{processed} / {len(domains)}")
+        if customers:
+            self.customer_dropdown.configure(values=customers)
+            active = data.get('active_customer')
+            if active and active in customers:
+                self.customer_dropdown.set(active)
+                self.current_customer = active
+                self.load_batches_for_customer(active)
+
+                # Load active batch
+                active_batch = data.get('active_batch')
+                batches = get_customer_batches(active)
+                if active_batch and active_batch in batches:
+                    self.batch_dropdown.set(active_batch)
+                    self.current_batch = active_batch
+                    self.load_batch_status()
+            else:
+                self.customer_dropdown.set(customers[0])
+                self.current_customer = customers[0]
+                self.load_batches_for_customer(customers[0])
         else:
+            self.customer_dropdown.configure(values=["No customers"])
+            self.customer_dropdown.set("No customers")
+            self.batch_dropdown.configure(values=["No batches"])
+            self.batch_dropdown.set("No batches")
+
+    def load_batches_for_customer(self, customer_name):
+        batches = get_customer_batches(customer_name)
+        if batches:
+            self.batch_dropdown.configure(values=batches)
+            self.batch_dropdown.set(batches[0])
+            self.current_batch = batches[0]
+            self.load_batch_status()
+        else:
+            self.batch_dropdown.configure(values=["No batches"])
+            self.batch_dropdown.set("No batches")
+            self.current_batch = None
+            self.domains_card.value_label.configure(text="No batch")
+            self.tests_card.value_label.configure(text="0")
+
+    def load_batch_status(self):
+        if not self.current_customer or not self.current_batch:
+            return
+
+        files = get_batch_files(self.current_customer, self.current_batch)
+        state = get_batch_state(self.current_customer, self.current_batch)
+
+        csv_file = state.get('csv_file')
+        if csv_file and os.path.exists(csv_file):
+            self.current_csv = csv_file
+            domains, _, error = get_unique_domains(csv_file)
+            if domains:
+                processed = len(state.get('processed_domains', []))
+                self.domains_card.value_label.configure(text=f"{processed} / {len(domains)}")
+            else:
+                self.domains_card.value_label.configure(text="CSV Error")
+        else:
+            self.current_csv = None
             self.domains_card.value_label.configure(text="No CSV")
 
-        if os.path.exists(OUTPUT_CSV_FILE):
-            with open(OUTPUT_CSV_FILE, 'r') as f:
+        if os.path.exists(files['queue']):
+            with open(files['queue'], 'r') as f:
                 tests = len(list(csv.reader(f)))
             self.tests_card.value_label.configure(text=str(tests))
         else:
             self.tests_card.value_label.configure(text="0")
+
+    def on_customer_change(self, customer_name):
+        if customer_name == "No customers":
+            return
+        self.current_customer = customer_name
+        data = load_customers()
+        data['active_customer'] = customer_name
+        save_customers(data)
+        self.load_batches_for_customer(customer_name)
+        self.log(f"Switched to customer: {customer_name}")
+
+    def on_batch_change(self, batch_name):
+        if batch_name == "No batches":
+            return
+        self.current_batch = batch_name
+        data = load_customers()
+        data['active_batch'] = batch_name
+        save_customers(data)
+        self.load_batch_status()
+        self.log(f"Switched to batch: {batch_name}")
+
+    def new_customer(self):
+        dialog = ctk.CTkInputDialog(text="Enter customer name:", title="New Customer")
+        name = dialog.get_input()
+        if name and name.strip():
+            name = name.strip()
+            create_customer(name)
+            data = load_customers()
+            self.customer_dropdown.configure(values=data['customers'])
+            self.customer_dropdown.set(name)
+            self.current_customer = name
+            self.load_batches_for_customer(name)
+            self.log(f"Created customer: {name}")
+
+    def new_batch(self):
+        if not self.current_customer or self.current_customer == "No customers":
+            messagebox.showerror("Error", "Please create a customer first")
+            return
+
+        dialog = ctk.CTkInputDialog(text="Enter batch name:", title="New Batch")
+        name = dialog.get_input()
+        if name and name.strip():
+            name = name.strip()
+            create_batch(self.current_customer, name)
+            batches = get_customer_batches(self.current_customer)
+            self.batch_dropdown.configure(values=batches)
+            self.batch_dropdown.set(name)
+            self.current_batch = name
+            self.load_batch_status()
+            self.log(f"Created batch: {name}")
 
     def check_api_key(self):
         if not load_api_key():
@@ -629,6 +1029,18 @@ class EmailGuardApp:
         if self.running:
             return
 
+        if not self.current_customer or self.current_customer == "No customers":
+            messagebox.showerror("Error", "Please create a customer first")
+            return
+
+        if not self.current_batch or self.current_batch == "No batches":
+            messagebox.showerror("Error", "Please create a batch first")
+            return
+
+        if not self.current_csv:
+            messagebox.showerror("Error", "Please select a CSV file first")
+            return
+
         if not API_KEY:
             messagebox.showerror("Error", "Please configure your API key first")
             self.show_settings()
@@ -640,11 +1052,11 @@ class EmailGuardApp:
 
         def run():
             try:
-                state = load_batch_state()
-                processed = set(state['processed_domains'])
-                batch_num = state['batch_number'] + 1
+                files = get_batch_files(self.current_customer, self.current_batch)
+                state = get_batch_state(self.current_customer, self.current_batch)
+                processed = set(state.get('processed_domains', []))
 
-                domains, domain_map, error = get_unique_domains(CSV_INPUT_FILE)
+                domains, domain_map, error = get_unique_domains(self.current_csv)
                 if error:
                     self.root.after(0, lambda: self.log(f"Error: {error}"))
                     return
@@ -655,10 +1067,9 @@ class EmailGuardApp:
                     return
 
                 batch = remaining[:MAX_DOMAINS_PER_BATCH]
-                self.root.after(0, lambda: self.log(f"Starting batch #{batch_num} with {len(batch)} domains"))
+                self.root.after(0, lambda: self.log(f"Starting with {len(batch)} domains"))
 
                 session = create_api_session()
-                ensure_data_dir()
                 results = []
 
                 for i, domain in enumerate(batch):
@@ -667,7 +1078,7 @@ class EmailGuardApp:
                     self.root.after(0, lambda d=domain: self.log(f"Processing: {d}"))
 
                     row = domain_map[domain]
-                    test_name = f"Inbox Test - {domain} - {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                    test_name = f"{self.current_customer} - {self.current_batch} - {domain}"
                     test_result, error = create_test(session, test_name)
 
                     if not test_result or 'data' not in test_result:
@@ -698,18 +1109,17 @@ class EmailGuardApp:
                         time.sleep(EMAIL_DELAY_SECONDS)
 
                 if results:
-                    with open(OUTPUT_CSV_FILE, mode='a', newline='') as f:
+                    with open(files['queue'], mode='a', newline='') as f:
                         writer = csv.writer(f)
                         for r in results:
                             writer.writerow([r['from_email'], r['test_uuid'], r['filter_phrase'], r['test_url']])
 
                 state['processed_domains'] = list(processed) + [r['domain'] for r in results]
-                state['batch_number'] = batch_num
-                save_batch_state(state)
+                save_batch_state(self.current_customer, self.current_batch, state)
                 session.close()
 
-                self.root.after(0, lambda: self.log(f"Batch complete: {len(results)} successful"))
-                self.root.after(0, self.load_status)
+                self.root.after(0, lambda: self.log(f"Complete: {len(results)} successful"))
+                self.root.after(0, self.load_batch_status)
 
             finally:
                 self.running = False
@@ -723,7 +1133,12 @@ class EmailGuardApp:
         if self.running:
             return
 
-        if not os.path.exists(OUTPUT_CSV_FILE):
+        if not self.current_customer or not self.current_batch:
+            messagebox.showinfo("Info", "Please select a customer and batch first")
+            return
+
+        files = get_batch_files(self.current_customer, self.current_batch)
+        if not os.path.exists(files['queue']):
             messagebox.showinfo("Info", "No tests found. Run tests first.")
             return
 
@@ -733,7 +1148,7 @@ class EmailGuardApp:
 
         def fetch():
             try:
-                with open(OUTPUT_CSV_FILE, mode='r', encoding='utf-8-sig') as f:
+                with open(files['queue'], mode='r', encoding='utf-8-sig') as f:
                     tests = list(csv.reader(f))
 
                 test_infos = [(row[0], row[1], row[3] if len(row) > 3 else '') for row in tests if len(row) >= 2]
@@ -758,7 +1173,7 @@ class EmailGuardApp:
                 self.root.after(0, lambda: self.log(f"Results: {len(completed)} completed, {len(pending)} pending"))
 
                 # Generate outputs
-                with open(RESULTS_CSV_FILE, mode='w', newline='', encoding='utf-8') as f:
+                with open(files['results'], mode='w', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
                     writer.writerow(['from_email', 'status', 'inbox_rate_%', 'google_%', 'microsoft_%', 'spam_%'])
                     for r in all_results:
@@ -770,7 +1185,9 @@ class EmailGuardApp:
                         ])
 
                 try:
-                    generate_pdf(all_results)
+                    generate_pdf(all_results, files['report'],
+                                title=f"Inbox Placement Report",
+                                subtitle=f"{self.current_customer} - {self.current_batch}")
                     self.root.after(0, lambda: self.log("PDF report generated!"))
                 except Exception as e:
                     self.root.after(0, lambda: self.log(f"PDF error: {e}"))
@@ -794,6 +1211,15 @@ class EmailGuardApp:
             self.status_card.value_label.configure(text="Stopped")
             self.log("Polling stopped")
         else:
+            if not self.current_customer or not self.current_batch:
+                messagebox.showinfo("Info", "Please select a customer and batch first")
+                return
+
+            files = get_batch_files(self.current_customer, self.current_batch)
+            if not os.path.exists(files['queue']):
+                messagebox.showinfo("Info", "No tests to poll. Run tests first.")
+                return
+
             self.running = True
             self.poll_btn.configure(text="⏹️  Stop Polling")
             self.status_card.value_label.configure(text="Polling...")
@@ -801,11 +1227,12 @@ class EmailGuardApp:
 
             def poll():
                 while self.running:
-                    if not os.path.exists(OUTPUT_CSV_FILE):
+                    files = get_batch_files(self.current_customer, self.current_batch)
+                    if not os.path.exists(files['queue']):
                         self.root.after(0, lambda: self.log("No tests to poll"))
                         break
 
-                    with open(OUTPUT_CSV_FILE, mode='r', encoding='utf-8-sig') as f:
+                    with open(files['queue'], mode='r', encoding='utf-8-sig') as f:
                         tests = list(csv.reader(f))
 
                     test_infos = [(row[0], row[1], row[3] if len(row) > 3 else '') for row in tests if len(row) >= 2]
@@ -827,7 +1254,7 @@ class EmailGuardApp:
                     if pending == 0:
                         self.root.after(0, lambda: self.log("All tests complete!"))
                         # Generate final report
-                        with open(RESULTS_CSV_FILE, mode='w', newline='', encoding='utf-8') as f:
+                        with open(files['results'], mode='w', newline='', encoding='utf-8') as f:
                             writer = csv.writer(f)
                             writer.writerow(['from_email', 'status', 'inbox_%', 'google_%', 'microsoft_%', 'spam_%'])
                             for r in all_results:
@@ -838,7 +1265,9 @@ class EmailGuardApp:
                                     f"{stats.get('microsoft_inbox_rate', 0):.1f}", f"{stats.get('spam_rate', 0):.1f}"
                                 ])
                         try:
-                            generate_pdf(all_results)
+                            generate_pdf(all_results, files['report'],
+                                        title=f"Inbox Placement Report",
+                                        subtitle=f"{self.current_customer} - {self.current_batch}")
                             self.root.after(0, lambda: self.log("PDF report generated!"))
                         except:
                             pass
@@ -892,32 +1321,103 @@ class EmailGuardApp:
 
         ctk.CTkButton(frame, text="Save", command=save).pack(pady=20)
 
-    def reset_all(self):
-        if messagebox.askyesno("Confirm Reset", "This will delete all test data. Continue?"):
-            for f in [BATCH_STATE_FILE, OUTPUT_CSV_FILE]:
+    def reset_batch(self):
+        if not self.current_customer or not self.current_batch:
+            return
+
+        if messagebox.askyesno("Confirm Reset", f"This will delete all test data for batch '{self.current_batch}'. Continue?"):
+            files = get_batch_files(self.current_customer, self.current_batch)
+            for f in [files['queue'], files['results'], files['report']]:
                 if os.path.exists(f):
                     os.remove(f)
-            if os.path.exists(DATA_DIR):
-                try:
-                    os.rmdir(DATA_DIR)
-                except:
-                    pass
-            self.log("All data reset")
-            self.load_status()
+
+            # Reset batch state but keep the batch
+            state = get_batch_state(self.current_customer, self.current_batch)
+            state['processed_domains'] = []
+            save_batch_state(self.current_customer, self.current_batch, state)
+
+            self.log(f"Batch '{self.current_batch}' reset")
+            self.load_batch_status()
 
     def select_csv(self):
-        global CSV_INPUT_FILE
+        if not self.current_customer or not self.current_batch:
+            messagebox.showerror("Error", "Please create a customer and batch first")
+            return
+
         file = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
         if file:
-            CSV_INPUT_FILE = file
+            self.current_csv = file
+            state = get_batch_state(self.current_customer, self.current_batch)
+            state['csv_file'] = file
+            save_batch_state(self.current_customer, self.current_batch, state)
             self.log(f"CSV file: {os.path.basename(file)}")
-            self.load_status()
+            self.load_batch_status()
 
-    def open_report(self):
-        if os.path.exists(PDF_REPORT_FILE):
-            os.system(f"open '{PDF_REPORT_FILE}'")
+    def open_batch_report(self):
+        if not self.current_customer or not self.current_batch:
+            messagebox.showinfo("Info", "Please select a customer and batch first")
+            return
+
+        files = get_batch_files(self.current_customer, self.current_batch)
+        if os.path.exists(files['report']):
+            os.system(f"open '{files['report']}'")
         else:
-            messagebox.showinfo("Info", "No report generated yet")
+            messagebox.showinfo("Info", "No report generated yet. Click 'Get Results' first.")
+
+    def generate_combined_report(self):
+        if not self.current_customer or self.current_customer == "No customers":
+            messagebox.showinfo("Info", "Please select a customer first")
+            return
+
+        batches = get_customer_batches(self.current_customer)
+        if not batches:
+            messagebox.showinfo("Info", "No batches found for this customer")
+            return
+
+        self.log(f"Generating combined report for {self.current_customer}...")
+
+        def generate():
+            try:
+                session = create_api_session()
+                batches_data = {}
+
+                for batch_name in batches:
+                    files = get_batch_files(self.current_customer, batch_name)
+                    if not os.path.exists(files['queue']):
+                        continue
+
+                    with open(files['queue'], mode='r', encoding='utf-8-sig') as f:
+                        tests = list(csv.reader(f))
+
+                    test_infos = [(row[0], row[1], row[3] if len(row) > 3 else '') for row in tests if len(row) >= 2]
+
+                    if not test_infos:
+                        continue
+
+                    all_results = []
+                    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
+                        futures = {executor.submit(fetch_single_result, session, info): info for info in test_infos}
+                        for future in as_completed(futures):
+                            all_results.append(future.result())
+
+                    if all_results:
+                        batches_data[batch_name] = all_results
+                        self.root.after(0, lambda b=batch_name: self.log(f"  Fetched: {b}"))
+
+                session.close()
+
+                if batches_data:
+                    output_file = get_customer_combined_report(self.current_customer)
+                    generate_combined_pdf(self.current_customer, batches_data, output_file)
+                    self.root.after(0, lambda: self.log("Combined report generated!"))
+                    self.root.after(0, lambda: os.system(f"open '{output_file}'"))
+                else:
+                    self.root.after(0, lambda: self.log("No data found to generate report"))
+
+            except Exception as e:
+                self.root.after(0, lambda: self.log(f"Error: {e}"))
+
+        threading.Thread(target=generate, daemon=True).start()
 
     def run(self):
         self.root.mainloop()
