@@ -21,7 +21,7 @@ GitHub: https://github.com/evesion/emailguard
 ===============================================================================
 """
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 __repo__ = "evesion/emailguard"
 
 import csv
@@ -1671,7 +1671,7 @@ class EmailGuardApp:
     def show_settings(self, first_run=False):
         dialog = ctk.CTkToplevel(self.root)
         dialog.title("Settings")
-        dialog.geometry("500x300")
+        dialog.geometry("500x380")
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -1703,7 +1703,55 @@ class EmailGuardApp:
             else:
                 messagebox.showerror("Error", "Please enter an API key")
 
-        ctk.CTkButton(frame, text="Save", command=save).pack(pady=20)
+        ctk.CTkButton(frame, text="Save", command=save).pack(pady=(20, 10))
+
+        # Separator
+        separator = ctk.CTkFrame(frame, height=2, fg_color="gray")
+        separator.pack(fill="x", pady=15)
+
+        # Update section
+        update_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        update_frame.pack(fill="x")
+
+        ctk.CTkLabel(update_frame, text="Software Updates", font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w")
+        ctk.CTkLabel(update_frame, text=f"Current version: v{__version__}", text_color="gray").pack(anchor="w", pady=(2, 8))
+
+        update_status_label = ctk.CTkLabel(update_frame, text="", text_color="gray")
+        update_status_label.pack(anchor="w")
+
+        def check_updates_clicked():
+            update_status_label.configure(text="Checking for updates...", text_color="gray")
+            dialog.update()
+
+            update_info = check_for_updates()
+            if update_info.get('available'):
+                update_status_label.configure(
+                    text=f"✅ Update available: v{update_info['latest']}",
+                    text_color="#2d7a2d"
+                )
+                # Show update button
+                update_btn = ctk.CTkButton(update_frame, text=f"Download v{update_info['latest']}",
+                                           fg_color="#2d5a27", hover_color="#3d7a37",
+                                           command=lambda: self.do_update_from_settings(dialog))
+                update_btn.pack(anchor="w", pady=(5, 0))
+            else:
+                update_status_label.configure(
+                    text="✓ You're running the latest version",
+                    text_color="gray"
+                )
+
+        ctk.CTkButton(update_frame, text="🔄 Check for Updates", width=160,
+                      command=check_updates_clicked).pack(anchor="w")
+
+    def do_update_from_settings(self, settings_dialog):
+        settings_dialog.destroy()
+        self.log("Downloading update...")
+        success, message = download_update()
+        if success:
+            messagebox.showinfo("Update Complete", message)
+            self.root.quit()
+        else:
+            messagebox.showerror("Update Failed", message)
 
     def reset_batch(self):
         if not self.current_customer or not self.current_batch:
