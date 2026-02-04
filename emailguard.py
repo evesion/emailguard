@@ -21,7 +21,7 @@ GitHub: https://github.com/evesion/emailguard
 ===============================================================================
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 __repo__ = "evesion/emailguard"
 
 import csv
@@ -748,6 +748,10 @@ def generate_combined_pdf(customer_name, batches_data, output_file):
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
     from reportlab.lib.enums import TA_CENTER
+    from reportlab.graphics.shapes import Drawing, Line, String, Rect
+    from reportlab.graphics.charts.lineplots import LinePlot
+    from reportlab.graphics.charts.legends import Legend
+    from reportlab.graphics.widgets.markers import makeMarker
 
     doc = SimpleDocTemplate(output_file, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
     styles = getSampleStyleSheet()
@@ -793,8 +797,10 @@ def generate_combined_pdf(customer_name, batches_data, output_file):
 
         story.append(Paragraph("Overall Summary (All Batches)", section_style))
 
-        # Batch summary table
+        # Batch summary table - also collect data for chart
         batch_summary = [['Batch', 'Tests', 'Inbox %', 'Google %', 'Microsoft %']]
+        chart_data = {'names': [], 'inbox': [], 'google': [], 'microsoft': []}
+
         for batch_name, results in batches_data.items():
             batch_completed = [r for r in results if r.get('status') in ['completed', 'complete']]
             if batch_completed:
@@ -804,6 +810,12 @@ def generate_combined_pdf(customer_name, batches_data, output_file):
                 b_google = sum(r['stats']['google_inbox_rate'] for r in b_google_tests) / len(b_google_tests) if b_google_tests else 0
                 b_microsoft = sum(r['stats']['microsoft_inbox_rate'] for r in b_microsoft_tests) / len(b_microsoft_tests) if b_microsoft_tests else 0
                 batch_summary.append([batch_name[:20], str(len(results)), f"{b_inbox:.0f}%", f"{b_google:.0f}%", f"{b_microsoft:.0f}%"])
+
+                # Store for chart
+                chart_data['names'].append(batch_name[:15] if len(batch_name) > 15 else batch_name)
+                chart_data['inbox'].append(b_inbox)
+                chart_data['google'].append(b_google)
+                chart_data['microsoft'].append(b_microsoft)
 
         if len(batch_summary) > 1:
             batch_table = Table(batch_summary, colWidths=[140, 60, 80, 80, 90])
@@ -819,6 +831,120 @@ def generate_combined_pdf(customer_name, batches_data, output_file):
             ]))
             story.append(batch_table)
             story.append(Spacer(1, 20))
+
+        # Trend Chart - only show if we have 2+ batches
+        if len(chart_data['names']) >= 2:
+            story.append(Paragraph("Inbox Rate Trend", section_style))
+
+            # Create the chart
+            drawing = Drawing(500, 250)
+
+            # Add background
+            drawing.add(Rect(40, 30, 420, 180, fillColor=colors.Color(0.98, 0.98, 0.98),
+                            strokeColor=colors.Color(0.8, 0.8, 0.8), strokeWidth=1))
+
+            # Create line plot
+            lp = LinePlot()
+            lp.x = 60
+            lp.y = 50
+            lp.width = 380
+            lp.height = 150
+
+            # Prepare data points - (x, y) tuples for each line
+            num_batches = len(chart_data['names'])
+            inbox_data = [(i, chart_data['inbox'][i]) for i in range(num_batches)]
+            google_data = [(i, chart_data['google'][i]) for i in range(num_batches)]
+            microsoft_data = [(i, chart_data['microsoft'][i]) for i in range(num_batches)]
+
+            lp.data = [inbox_data, google_data, microsoft_data]
+
+            # Style the lines
+            lp.lines[0].strokeColor = colors.Color(0.2, 0.4, 0.8)  # Blue - Overall
+            lp.lines[0].strokeWidth = 3
+            lp.lines[0].symbol = makeMarker('FilledCircle')
+            lp.lines[0].symbol.fillColor = colors.Color(0.2, 0.4, 0.8)
+            lp.lines[0].symbol.size = 8
+
+            lp.lines[1].strokeColor = colors.Color(0.85, 0.2, 0.2)  # Red - Google
+            lp.lines[1].strokeWidth = 2
+            lp.lines[1].symbol = makeMarker('FilledSquare')
+            lp.lines[1].symbol.fillColor = colors.Color(0.85, 0.2, 0.2)
+            lp.lines[1].symbol.size = 6
+
+            lp.lines[2].strokeColor = colors.Color(0.1, 0.6, 0.2)  # Green - Microsoft
+            lp.lines[2].strokeWidth = 2
+            lp.lines[2].symbol = makeMarker('FilledDiamond')
+            lp.lines[2].symbol.fillColor = colors.Color(0.1, 0.6, 0.2)
+            lp.lines[2].symbol.size = 6
+
+            # Configure axes
+            lp.xValueAxis.valueMin = -0.2
+            lp.xValueAxis.valueMax = num_batches - 0.8
+            lp.xValueAxis.valueSteps = list(range(num_batches))
+            lp.xValueAxis.labelTextFormat = lambda x: chart_data['names'][int(x)] if 0 <= int(x) < num_batches else ''
+            lp.xValueAxis.labels.fontName = 'Helvetica'
+            lp.xValueAxis.labels.fontSize = 8
+            lp.xValueAxis.labels.angle = 0
+
+            lp.yValueAxis.valueMin = 0
+            lp.yValueAxis.valueMax = 100
+            lp.yValueAxis.valueSteps = [0, 25, 50, 75, 100]
+            lp.yValueAxis.labelTextFormat = '%d%%'
+            lp.yValueAxis.labels.fontName = 'Helvetica'
+            lp.yValueAxis.labels.fontSize = 9
+
+            drawing.add(lp)
+
+            # Add legend
+            legend = Legend()
+            legend.x = 150
+            legend.y = 15
+            legend.dx = 8
+            legend.dy = 8
+            legend.fontName = 'Helvetica'
+            legend.fontSize = 9
+            legend.boxAnchor = 'c'
+            legend.columnMaximum = 1
+            legend.strokeWidth = 0
+            legend.strokeColor = None
+            legend.deltax = 100
+            legend.deltay = 0
+            legend.autoXPadding = 10
+            legend.alignment = 'right'
+            legend.dividerLines = 0
+            legend.colorNamePairs = [
+                (colors.Color(0.2, 0.4, 0.8), 'Overall Inbox'),
+                (colors.Color(0.85, 0.2, 0.2), 'Google'),
+                (colors.Color(0.1, 0.6, 0.2), 'Microsoft'),
+            ]
+            drawing.add(legend)
+
+            # Add title
+            drawing.add(String(250, 235, 'Inbox Placement Rate by Batch',
+                              fontSize=12, fontName='Helvetica-Bold',
+                              fillColor=colors.Color(0.2, 0.3, 0.5), textAnchor='middle'))
+
+            story.append(drawing)
+            story.append(Spacer(1, 20))
+
+            # Add trend analysis text
+            first_inbox = chart_data['inbox'][0]
+            last_inbox = chart_data['inbox'][-1]
+            change = last_inbox - first_inbox
+
+            if change > 5:
+                trend_text = f"📈 <b>Improving:</b> Inbox rate increased by {change:.1f}% from first to last batch"
+                trend_color = colors.Color(0.1, 0.5, 0.1)
+            elif change < -5:
+                trend_text = f"📉 <b>Declining:</b> Inbox rate decreased by {abs(change):.1f}% from first to last batch"
+                trend_color = colors.Color(0.7, 0.1, 0.1)
+            else:
+                trend_text = f"➡️ <b>Stable:</b> Inbox rate remained relatively stable (±{abs(change):.1f}%)"
+                trend_color = colors.Color(0.4, 0.4, 0.4)
+
+            trend_style = ParagraphStyle('Trend', parent=styles['Normal'], fontSize=11,
+                                         textColor=trend_color, spaceAfter=20)
+            story.append(Paragraph(trend_text, trend_style))
 
         # Overall metrics
         story.append(Paragraph("Combined Performance", section_style))
