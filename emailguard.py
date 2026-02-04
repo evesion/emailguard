@@ -21,7 +21,7 @@ GitHub: https://github.com/evesion/emailguard
 ===============================================================================
 """
 
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 __repo__ = "evesion/emailguard"
 
 import csv
@@ -1047,6 +1047,8 @@ class EmailGuardApp:
         self.current_customer = None
         self.current_batch = None
         self.current_csv = None
+        self.total_domains = 0
+        self.processed_domains = 0
 
         # Load settings
         self.settings = load_settings()
@@ -1131,8 +1133,8 @@ class EmailGuardApp:
         cards_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         cards_frame.pack(fill="x", pady=(0, 15))
 
-        # Domains card
-        self.domains_card = self.create_stat_card(cards_frame, "Domains", "0 / 0", "📋")
+        # Domains card - shows "next run / remaining"
+        self.domains_card = self.create_stat_card(cards_frame, "Next / Remaining", "0 / 0", "📋")
         self.domains_card.pack(side="left", expand=True, fill="x", padx=(0, 10))
 
         # Tests card
@@ -1218,6 +1220,8 @@ class EmailGuardApp:
         # Save to settings
         self.settings['batch_size'] = self.batch_size
         save_settings(self.settings)
+        # Update the domains card to reflect new batch size
+        self.update_next_run_display()
 
     def load_saved_state(self):
         data = load_customers()
@@ -1274,12 +1278,17 @@ class EmailGuardApp:
             self.current_csv = csv_file
             domains, _, error = get_unique_domains(csv_file)
             if domains:
-                processed = len(state.get('processed_domains', []))
-                self.domains_card.value_label.configure(text=f"{processed} / {len(domains)}")
+                self.total_domains = len(domains)
+                self.processed_domains = len(state.get('processed_domains', []))
+                self.update_next_run_display()
             else:
+                self.total_domains = 0
+                self.processed_domains = 0
                 self.domains_card.value_label.configure(text="CSV Error")
         else:
             self.current_csv = None
+            self.total_domains = 0
+            self.processed_domains = 0
             self.domains_card.value_label.configure(text="No CSV")
 
         if os.path.exists(files['queue']):
@@ -1288,6 +1297,19 @@ class EmailGuardApp:
             self.tests_card.value_label.configure(text=str(tests))
         else:
             self.tests_card.value_label.configure(text="0")
+
+    def update_next_run_display(self):
+        """Update the domains card to show next run info"""
+        if not hasattr(self, 'total_domains'):
+            return
+
+        remaining = self.total_domains - self.processed_domains
+        next_run = min(remaining, self.batch_size)
+
+        if remaining <= 0:
+            self.domains_card.value_label.configure(text=f"✓ {self.total_domains}")
+        else:
+            self.domains_card.value_label.configure(text=f"{next_run} / {remaining}")
 
     def on_customer_change(self, customer_name):
         if customer_name == "No customers":
