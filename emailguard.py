@@ -28,12 +28,15 @@ import csv
 import json
 import logging
 import os
+import platform
 import shutil
 import smtplib
 import ssl
+import subprocess
 import sys
 import threading
 import time
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from email.mime.text import MIMEText
@@ -73,6 +76,24 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
 API_KEY = None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CROSS-PLATFORM FILE OPENING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def open_file(filepath):
+    """Open a file with the default system application in a cross-platform way."""
+    try:
+        system = platform.system()
+        if system == 'Darwin':  # macOS
+            subprocess.run(['open', filepath], check=True)
+        elif system == 'Windows':
+            os.startfile(filepath)
+        else:  # Linux and other Unix-like systems
+            subprocess.run(['xdg-open', filepath], check=True)
+    except Exception as e:
+        logger.error(f"Failed to open file: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1714,7 +1735,7 @@ class EmailGuardApp:
         link = ctk.CTkLabel(frame, text="https://app.emailguard.io/settings/api",
                            text_color="#4a9eff", cursor="hand2")
         link.pack(anchor="w")
-        link.bind("<Button-1>", lambda e: os.system("open https://app.emailguard.io/settings/api"))
+        link.bind("<Button-1>", lambda e: webbrowser.open("https://app.emailguard.io/settings/api"))
 
         def save():
             key = api_entry.get().strip()
@@ -1821,7 +1842,7 @@ class EmailGuardApp:
 
         files = get_batch_files(self.current_customer, self.current_batch)
         if os.path.exists(files['report']):
-            os.system(f"open '{files['report']}'")
+            open_file(files['report'])
         else:
             messagebox.showinfo("Info", "No report generated yet. Click 'Get Results' first.")
 
@@ -1871,7 +1892,7 @@ class EmailGuardApp:
                     output_file = get_customer_combined_report(self.current_customer)
                     generate_combined_pdf(self.current_customer, batches_data, output_file)
                     self.root.after(0, lambda: self.log("Combined report generated!"))
-                    self.root.after(0, lambda: os.system(f"open '{output_file}'"))
+                    self.root.after(0, lambda: open_file(output_file))
                 else:
                     self.root.after(0, lambda: self.log("No data found to generate report"))
 
