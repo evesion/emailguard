@@ -21,7 +21,7 @@ GitHub: https://github.com/evesion/emailguard
 ===============================================================================
 """
 
-__version__ = "1.4.2"
+__version__ = "1.5.0"
 __repo__ = "evesion/emailguard"
 
 import csv
@@ -391,7 +391,9 @@ def get_batch_files(customer_name, batch_name):
         'state': os.path.join(batch_dir, 'batch_state.json'),
         'queue': os.path.join(batch_dir, 'test_queue.csv'),
         'results': os.path.join(batch_dir, 'results.csv'),
-        'report': os.path.join(batch_dir, 'report.pdf')
+        'report': os.path.join(batch_dir, 'report.pdf'),
+        'blacklist_results': os.path.join(batch_dir, 'blacklist_results.json'),
+        'blacklist_report': os.path.join(batch_dir, 'blacklist_report.pdf')
     }
 
 
@@ -623,6 +625,24 @@ def fetch_single_result(session, test_info):
         'test_name': data.get('name', ''), 'status': data.get('status', ''),
         'overall_score': data.get('overall_score', ''), 'stats': stats
     }
+
+
+def check_blacklist(session, domain):
+    """Check a domain against blacklists using EmailGuard ad-hoc endpoint."""
+    try:
+        response = session.post(f"{API_BASE_URL}/blacklist-checks/ad-hoc",
+                                json={"domain_or_ip": domain})
+        response.raise_for_status()
+        data = response.json().get('data', {})
+        return {
+            'domain': data.get('domain', domain),
+            'ip': data.get('ip', ''),
+            'status': data.get('status', 'Unknown'),
+            'blacklists_count': data.get('blacklists_count', 0),
+            'blacklists': data.get('blacklists', [])
+        }, None
+    except Exception as e:
+        return None, str(e)
 
 
 def generate_pdf(all_results, output_file, title="Email Inbox Placement Report", subtitle=None):
@@ -1037,6 +1057,108 @@ def generate_combined_pdf(customer_name, batches_data, output_file):
     doc.build(story)
 
 
+def generate_blacklist_pdf(results, output_file, customer_name, batch_name):
+    """Generate a PDF report for blacklist check results."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.enums import TA_CENTER
+
+    doc = SimpleDocTemplate(output_file, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=24, spaceAfter=10,
+                                  alignment=TA_CENTER, textColor=colors.Color(0.2, 0.3, 0.5))
+    subtitle_style = ParagraphStyle('Subtitle', parent=styles['Normal'], fontSize=14,
+                                     alignment=TA_CENTER, textColor=colors.Color(0.3, 0.4, 0.5), spaceAfter=5)
+    date_style = ParagraphStyle('Date', parent=styles['Normal'], fontSize=12,
+                                 alignment=TA_CENTER, textColor=colors.gray, spaceAfter=20)
+    section_style = ParagraphStyle('Section', parent=styles['Heading2'], fontSize=14,
+                                    spaceBefore=20, spaceAfter=10, textColor=colors.Color(0.2, 0.3, 0.5))
+
+    story = []
+    story.append(Paragraph("Blacklist Check Report", title_style))
+    story.append(Paragraph(f"{customer_name} - {batch_name}", subtitle_style))
+    story.append(Paragraph(datetime.now().strftime("%B %d, %Y at %I:%M %p"), date_style))
+
+    # Summary
+    total = len(results)
+    clean = sum(1 for r in results if r.get('blacklists_count', 0) == 0)
+    blacklisted = total - clean
+
+    story.append(Paragraph("Summary", section_style))
+
+    green = colors.Color(0.2, 0.7, 0.2)
+    red = colors.Color(0.8, 0.2, 0.2)
+
+    summary_data = [
+        ['Total Domains', 'Clean', 'Blacklisted'],
+        [str(total), str(clean), str(blacklisted)]
+    ]
+    summary_table = Table(summary_data, colWidths=[170, 170, 170])
+    summary_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.Color(0.2, 0.3, 0.5)),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 12),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('GRID', (0, 0), (-1, -1), 1, colors.Color(0.8, 0.8, 0.8)),
+        ('TOPPADDING', (0, 0), (-1, -1), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+        ('TEXTCOLOR', (1, 1), (1, 1), green),
+        ('TEXTCOLOR', (2, 1), (2, 1), red if blacklisted > 0 else green),
+        ('FONTNAME', (0, 1), (-1, 1), 'Helvetica-Bold'),
+    ]))
+    story.append(summary_table)
+    story.append(Spacer(1, 20))
+
+    # Detailed results table
+    story.append(Paragraph("Detailed Results", section_style))
+
+    table_data = [['Domain', 'IP Address', 'Blacklists', 'Listed On']]
+    for r in sorted(results, key=lambda x: x.get('blacklists_count', 0), reverse=True):
+        bl_count = r.get('blacklists_count', 0)
+        bl_list = ', '.join(r.get('blacklists', [])) if r.get('blacklists') else '-'
+        # Truncate long blacklist strings for table
+        if len(bl_list) > 60:
+            bl_list = bl_list[:57] + '...'
+        table_data.append([
+            r.get('domain', ''),
+            r.get('ip', 'N/A'),
+            str(bl_count),
+            bl_list
+        ])
+
+    detail_table = Table(table_data, colWidths=[130, 100, 70, 210])
+    style_cmds = [
+        ('BACKGROUND', (0, 0), (-1, 0), colors.Color(0.2, 0.3, 0.5)),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('ALIGN', (2, 0), (2, -1), 'CENTER'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.Color(0.8, 0.8, 0.8)),
+        ('BOX', (0, 0), (-1, -1), 1, colors.Color(0.2, 0.3, 0.5)),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+    ]
+    for i in range(1, len(table_data)):
+        bl_count = results[i - 1].get('blacklists_count', 0) if i - 1 < len(results) else 0
+        if bl_count > 0:
+            style_cmds.append(('BACKGROUND', (0, i), (-1, i), colors.Color(1.0, 0.92, 0.92)))
+            style_cmds.append(('TEXTCOLOR', (2, i), (2, i), red))
+        else:
+            bg = colors.Color(0.95, 0.95, 0.97) if i % 2 == 0 else colors.white
+            style_cmds.append(('BACKGROUND', (0, i), (-1, i), bg))
+            style_cmds.append(('TEXTCOLOR', (2, i), (2, i), green))
+        style_cmds.append(('FONTNAME', (2, i), (2, i), 'Helvetica-Bold'))
+
+    detail_table.setStyle(TableStyle(style_cmds))
+    story.append(detail_table)
+
+    doc.build(story)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # GUI APPLICATION
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1207,6 +1329,10 @@ class EmailGuardApp:
         self.combined_report_btn = ctk.CTkButton(bottom_frame1, text="📑 Combined Report", width=140,
                                                   fg_color="#1a5f1a", hover_color="#2d7a2d", command=self.generate_combined_report)
         self.combined_report_btn.pack(side="left", padx=(10, 0))
+
+        self.blacklist_btn = ctk.CTkButton(bottom_frame1, text="🛡️ Blacklist Check", width=140,
+                                            fg_color="#5a3d1a", hover_color="#7a5d2d", command=self.run_blacklist_check)
+        self.blacklist_btn.pack(side="left", padx=(10, 0))
 
         self.settings_btn = ctk.CTkButton(bottom_frame1, text="⚙️ Settings", width=100, command=self.show_settings)
         self.settings_btn.pack(side="right")
@@ -1845,6 +1971,90 @@ class EmailGuardApp:
             open_file(files['report'])
         else:
             messagebox.showinfo("Info", "No report generated yet. Click 'Get Results' first.")
+
+    def run_blacklist_check(self):
+        if self.running:
+            return
+
+        if not self.current_customer or self.current_customer == "No customers":
+            messagebox.showerror("Error", "Please create a customer first")
+            return
+
+        if not self.current_batch or self.current_batch == "No batches":
+            messagebox.showerror("Error", "Please create a batch first")
+            return
+
+        if not self.current_csv:
+            messagebox.showerror("Error", "Please select a CSV file first")
+            return
+
+        if not API_KEY:
+            messagebox.showerror("Error", "Please configure your API key first")
+            self.show_settings()
+            return
+
+        domains, _, error = get_unique_domains(self.current_csv)
+        if error or not domains:
+            messagebox.showerror("Error", error or "No domains found in CSV")
+            return
+
+        self.running = True
+        self.blacklist_btn.configure(state="disabled")
+        self.status_card.value_label.configure(text="Checking...")
+
+        def check():
+            try:
+                self.root.after(0, lambda: self.log(f"Starting blacklist check for {len(domains)} domains..."))
+                session = create_api_session()
+                all_results = []
+
+                with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
+                    futures = {executor.submit(check_blacklist, session, d): d for d in domains}
+                    for i, future in enumerate(as_completed(futures)):
+                        domain = futures[future]
+                        result, error = future.result()
+                        progress = (i + 1) / len(domains)
+                        self.root.after(0, lambda p=progress: self.progress.set(p))
+
+                        if result:
+                            all_results.append(result)
+                            bl_count = result.get('blacklists_count', 0)
+                            if bl_count > 0:
+                                self.root.after(0, lambda d=domain, c=bl_count: self.log(f"  ⚠️ {d} - Listed on {c} blacklist(s)"))
+                            else:
+                                self.root.after(0, lambda d=domain: self.log(f"  ✅ {d} - Clean"))
+                        else:
+                            self.root.after(0, lambda d=domain, e=error: self.log(f"  ❌ {d} - Error: {e[:50]}"))
+
+                session.close()
+
+                # Save results
+                files = get_batch_files(self.current_customer, self.current_batch)
+                with open(files['blacklist_results'], 'w') as f:
+                    json.dump(all_results, f, indent=2)
+
+                # Summary
+                clean = sum(1 for r in all_results if r.get('blacklists_count', 0) == 0)
+                blacklisted = len(all_results) - clean
+                self.root.after(0, lambda: self.log(f"Blacklist check complete: {clean} clean, {blacklisted} blacklisted"))
+
+                # Generate PDF
+                if all_results:
+                    try:
+                        generate_blacklist_pdf(all_results, files['blacklist_report'],
+                                              self.current_customer, self.current_batch)
+                        self.root.after(0, lambda: self.log("Blacklist PDF report generated!"))
+                        self.root.after(0, lambda: open_file(files['blacklist_report']))
+                    except Exception as e:
+                        self.root.after(0, lambda: self.log(f"PDF error: {e}"))
+
+            finally:
+                self.running = False
+                self.root.after(0, lambda: self.blacklist_btn.configure(state="normal"))
+                self.root.after(0, lambda: self.status_card.value_label.configure(text="Ready"))
+                self.root.after(0, lambda: self.progress.set(0))
+
+        threading.Thread(target=check, daemon=True).start()
 
     def generate_combined_report(self):
         if not self.current_customer or self.current_customer == "No customers":
